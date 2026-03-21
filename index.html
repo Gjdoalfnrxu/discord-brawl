@@ -269,6 +269,7 @@ let GS = {
   chomskySplash: 0,
   waveAnnounce: 0,
   _prevWave: 0,
+  waveClear: false,
 };
 
 function spawnBots(p, gs, n) {
@@ -302,7 +303,7 @@ function startGame() {
   GS.enemies = []; GS.bullets = []; GS.gems = [];
   GS.bots = []; GS.particles = [];
   GS.wave = 1; GS.score = 0;
-  GS.levelOpts = null; GS.chomskySplash = 0;
+  GS.levelOpts = null; GS.chomskySplash = 0; GS.waveClear = false;
   GS.waveAnnounce = 0; GS._prevWave = 0;
   startWave(1);
 }
@@ -363,6 +364,79 @@ function gameOver() {
 
 // ─── INPUT ────────────────────────────────────────────────────────────────────
 const K = {};
+
+// ─── TOUCH / MOBILE ──────────────────────────────────────────────────────────
+const isMobile = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isMobile) document.getElementById('instructions').textContent = 'Left stick: Move  |  Right button: Special  |  Auto-attacks nearest enemy';
+
+const touch = {
+  joystick: { active: false, id: null, baseX: 0, baseY: 0, dx: 0, dy: 0 },
+  special:  { active: false, id: null },
+};
+// Joystick lives bottom-left, special button bottom-right (in canvas coords)
+const JOY_R = 55,   JOY_X = 90,  JOY_Y = H - 90;
+const BTN_R = 38,   BTN_X = W - 70, BTN_Y = H - 80;
+
+function canvasPos(touch, rect) {
+  return {
+    x: (touch.clientX - rect.left) * (W / rect.width),
+    y: (touch.clientY - rect.top)  * (H / rect.height),
+  };
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  for (const t of e.changedTouches) {
+    const { x, y } = canvasPos(t, rect);
+    // Select / gameover screens: tap anywhere = confirm
+    if (GS.scene === 'select') { startGame(); return; }
+    if (GS.scene === 'gameover') { GS.scene = 'select'; return; }
+    if (GS.levelOpts) {
+      for (let i = 0; i < 3; i++) {
+        const bx = W/2-120, by = H/2-50+i*58;
+        if (x>=bx && x<=bx+240 && y>=by && y<=by+48) { applyUpgrade(i); return; }
+      }
+      return;
+    }
+    // Special button
+    if (Math.hypot(x - BTN_X, y - BTN_Y) < BTN_R + 20 && !touch.special.active) {
+      touch.special.active = true; touch.special.id = t.identifier;
+      doSpecial();
+    } else if (!touch.joystick.active) {
+      // Anywhere else = joystick
+      touch.joystick.active = true; touch.joystick.id = t.identifier;
+      touch.joystick.baseX = x; touch.joystick.baseY = y;
+      touch.joystick.dx = 0; touch.joystick.dy = 0;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touch.joystick.id) {
+      const { x, y } = canvasPos(t, rect);
+      const dx = x - touch.joystick.baseX, dy = y - touch.joystick.baseY;
+      const dist = Math.hypot(dx, dy);
+      const clamped = Math.min(dist, JOY_R);
+      touch.joystick.dx = (dx / dist || 0) * (clamped / JOY_R);
+      touch.joystick.dy = (dy / dist || 0) * (clamped / JOY_R);
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touch.joystick.id) {
+      touch.joystick.active = false; touch.joystick.dx = 0; touch.joystick.dy = 0;
+    }
+    if (t.identifier === touch.special.id) { touch.special.active = false; }
+  }
+}, { passive: false });
+
 addEventListener('keydown', e => {
   K[e.code] = true;
   if (GS.scene === 'select') {
@@ -440,7 +514,10 @@ function update(dt) {
   if (K.ArrowDown || K.KeyS) dy += 1;
   if (K.ArrowLeft || K.KeyA) dx -= 1;
   if (K.ArrowRight || K.KeyD) dx += 1;
-  if (dx && dy) { dx *= 0.707; dy *= 0.707; }
+  if (touch.joystick.active) { dx += touch.joystick.dx; dy += touch.joystick.dy; }
+  const mag = Math.hypot(dx, dy);
+  if (mag > 1) { dx /= mag; dy /= mag; }
+  if (!mag) { /* no movement */ }
   const spd = p.spd * (p.speedBoost || 1);
   p.x = Math.max(p.radius, Math.min(W - p.radius, p.x + dx * spd));
   p.y = Math.max(p.radius, Math.min(H - p.radius, p.y + dy * spd));
@@ -615,12 +692,13 @@ function update(dt) {
   }
 
   // Wave clear
-  if (GS.spawned >= GS.toSpawn && !GS.enemies.some(e => !e._ph)) {
+  if (!GS.waveClear && GS.spawned >= GS.toSpawn && !GS.enemies.some(e => !e._ph)) {
+    GS.waveClear = true;
     GS.score += GS.wave * 50 + 100;
     GS.wave++;
-    GS.enemies.push({ _ph: true }); // prevent re-trigger
     setTimeout(() => {
-      GS.enemies = GS.enemies.filter(e => !e._ph);
+      GS.enemies = [];
+      GS.waveClear = false;
       startWave(GS.wave);
     }, 1800);
   }
@@ -830,6 +908,9 @@ function drawGame() {
   // HUD
   if (p) drawHUD(p);
 
+  // Touch controls
+  if (isMobile && GS.scene === 'game' && !GS.levelOpts) drawTouchUI(p);
+
   // Level up overlay
   if (GS.levelOpts) drawLevelUp();
 
@@ -964,6 +1045,46 @@ function drawGameOver() {
   ctx.font = '14px Courier New';
   ctx.fillText('ENTER or R to play again', W / 2, H / 2 + 132);
   ctx.textAlign = 'left';
+}
+
+// ─── TOUCH UI ────────────────────────────────────────────────────────────────
+function drawTouchUI(p) {
+  // Joystick base
+  const jx = touch.joystick.active ? touch.joystick.baseX : JOY_X;
+  const jy = touch.joystick.active ? touch.joystick.baseY : JOY_Y;
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(jx, jy, JOY_R, 0, Math.PI * 2); ctx.stroke();
+  // Stick
+  const stx = jx + touch.joystick.dx * JOY_R;
+  const sty = jy + touch.joystick.dy * JOY_R;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(stx, sty, 18, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Special button
+  const cdPct = p ? Math.max(0, 1 - p.specialCd / p.char.cooldown) : 0;
+  ctx.globalAlpha = 0.45;
+  ctx.fillStyle = cdPct >= 1 ? '#ffaa00' : '#443300';
+  ctx.beginPath(); ctx.arc(BTN_X, BTN_Y, BTN_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = cdPct >= 1 ? '#ffdd44' : '#665500'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(BTN_X, BTN_Y, BTN_R, 0, Math.PI * 2); ctx.stroke();
+  // CD sweep
+  if (cdPct < 1) {
+    ctx.fillStyle = '#ffaa0066';
+    ctx.beginPath();
+    ctx.moveTo(BTN_X, BTN_Y);
+    ctx.arc(BTN_X, BTN_Y, BTN_R, -Math.PI/2, -Math.PI/2 + Math.PI*2*cdPct);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = cdPct >= 1 ? '#fff' : '#888';
+  ctx.font = 'bold 9px Courier New'; ctx.textAlign = 'center';
+  ctx.fillText('Q', BTN_X, BTN_Y - 3);
+  ctx.font = '7px Courier New';
+  ctx.fillText(cdPct >= 1 ? 'READY' : p ? `${Math.ceil(p.specialCd/1000)}s` : '', BTN_X, BTN_Y + 9);
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
 }
 
 // ─── MAIN LOOP ────────────────────────────────────────────────────────────────
